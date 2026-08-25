@@ -1,105 +1,105 @@
+import json
 import re
 import requests
 from bs4 import BeautifulSoup
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
 BASE_URL = "https://trouverunlogement.lescrous.fr"
 
-
-def fetch_page(tool_id=47, page=1):
-    """Fetches the search results HTML page from Crous."""
-    url = f"{BASE_URL}/tools/{tool_id}/search?page={page}"
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=12)
-        response.raise_for_status()
-        return response.text
-    except Exception as e:
-        print(f"❌ Error fetching Crous page: {e}")
-        return None
-
-
-def parse_page(html_content):
-    """
-    Parses each accommodation card using the modern DSFR HTML classes.
-    """
-    if not html_content:
-        return []
-
-    soup = BeautifulSoup(html_content, "html.parser")
-    cards = soup.find_all("div", class_="fr-card")
-    rooms = []
-
-    for card in cards:
-        # --- 1. Scrape Title and Link ---
-        title_el = card.select_one("h3.fr-card__title a")
-        if not title_el:
-            continue
-
-        title = title_el.get_text(strip=True)
-        rel_link = title_el.get("href", "").strip()
-        link = f"{BASE_URL}{rel_link}" if rel_link.startswith("/") else rel_link
-
-        # Extract numerical accommodation ID from link (e.g. 1521)
-        id_match = re.search(r"/accommodations/(\d+)", link)
-        room_id = id_match.group(1) if id_match else link
-
-        # --- 2. Scrape Address & Postal Code ---
-        desc_el = card.select_one("p.fr-card__desc")
-        address = desc_el.get_text(strip=True) if desc_el else "N/A"
-
-        postal_code_match = re.search(r"\b\d{5}\b", address)
-        postal_code = postal_code_match.group(0) if postal_code_match else ""
-
-        # --- 3. Scrape Price ---
-        badge_el = card.select_one("ul.fr-badges-group p.fr-badge")
-        price = badge_el.get_text(strip=True) if badge_el else "N/A"
-
-        rooms.append({
-            "id": str(room_id),
-            "title": title,
-            "address": address,
-            "price": price,
-            "postal_code": postal_code,
-            "link": link,
-            "url": link,  # Provided as fallback for bots using room['url']
-        })
-
-    return rooms
-
-
-def get_available_rooms(tool_id=47, max_pages=3):
-    """
-    Main function called by bot.py / notifier.py.
-    Scrapes multiple pages and deduplicates the results.
-    """
+def get_available_rooms(tool_id=47, target_department="63", max_pages=3):
+    print("🔍 [Scraper] Fetching rooms from Crous...")
     all_rooms = []
     seen_ids = set()
 
     for page in range(1, max_pages + 1):
-        html = fetch_page(tool_id=tool_id, page=page)
-        if not html:
+        url = f"{BASE_URL}/tools/{tool_id}/search?page={page}"
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            if resp.status_code != 200:
+                print(f"⚠️ [Scraper] Error {resp.status_code} fetching page {page}")
+                break
+                
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            
+            # The most reliable method: Extract the JSON embedded directly by the website
+            script_tag = soup.find('script', attrs={'data-url': lambda u: u and '/api/fr/search/' in u})
+            
+            if not script_tag or not script_tag.string:
+                print(f"⚠️ [Scraper] No JSON data found on page {page}. (End of results or blocked)")
+                break
+                
+            data = json.loads(script_tag.string)
+            body = json.loads(data['body'])
+            items = body.get('results', {}).get('items', [])
+            
+            if not items:
+                print(f"✅ [Scraper] Page {page} is empty. Stopping pagination.")
+                break
+                
+            for item in items:
+                room_id = str(item.get('id'))
+                if room_id in seen_ids:
+                    continue
+                seen_ids.add(room_id)
+                
+                # Extract clean Title and Address
+                residence = item.get('residence', {})
+                title = residence.get('label', 'Logement inconnu').strip()
+                address = residence.get('address', 'Adresse inconnue').strip()
+                
+                # Postal code extraction for your department filter
+                postal_code_match = re.search(r"\b\d{5}\b", address)
+                postal_code = postal_code_match.group(0) if postal_code_match else ""
+                
+                matches_dept = False
+                if target_department and postal_code:
+                    matches_dept = postal_code.startswith(str(target_department))
+
+                # Price extraction (Crous JSON stores prices in cents, e.g. 23700 = 237.00€)
+                price_str = "Prix non indiqué"
+                modes = item.get('occupationModes', [])
+                if modes:
+                    rents = [m['rent']['min'] for m in modes if 'rent' in m and 'min' in m['rent']]
+                    if rents:
+                        price_str = f"{min(rents) / 100:.2f} €".replace('.', ',')
+
+                link = f"{BASE_URL}/tools/{tool_id}/accommodations/{room_id}"
+                
+                # We include multiple keys to ensure compatibility with your bot's other files
+                room_data = {
+                    "id": room_id,
+                    "title": title,
+                    "name": title,          # Fallback if bot uses item['name']
+                    "address": address,
+                    "location": address,    # Fallback if bot uses item['location']
+                    "price": price_str,
+                    "postal_code": postal_code,
+                    "matches_dept": matches_dept,
+                    "link": link,
+                    "url": link             # Fallback if bot uses item['url']
+                }
+                all_rooms.append(room_data)
+                
+            print(f"✅ [Scraper] Page {page}: Extracted {len(items)} rooms.")
+            
+        except Exception as e:
+            print(f"❌ [Scraper] Exception on page {page}: {e}")
             break
 
-        rooms = parse_page(html)
-        if not rooms:
-            break
-
-        for room in rooms:
-            if room["id"] not in seen_ids:
-                seen_ids.add(room["id"])
-                all_rooms.append(room)
-
+    print(f"🎉 [Scraper] Total unique rooms extracted: {len(all_rooms)}")
     return all_rooms
 
-
-# Fallback alias in case other files import under alternative names
+# Aliases just in case your main.py uses a different import name
 scrape_rooms = get_available_rooms
 get_rooms = get_available_rooms
+
+# Optional: You can test this file directly by running `python scraper.py`
+if __name__ == "__main__":
+    rooms = get_available_rooms(max_pages=1)
+    if rooms:
+        print("\nTest Output of the first room:")
+        print(json.dumps(rooms[0], indent=4, ensure_ascii=False))
