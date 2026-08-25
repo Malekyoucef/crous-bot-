@@ -26,14 +26,14 @@ def matches_department(location_text, user_region):
         return False
     
     # Find all 5-digit numbers in the location string
-    matches = re.findall(r'\b\d{5}\b', location_text)
+    matches = re.findall(r'\b\d{5}\b', str(location_text))
     
     if matches:
         # Take the last 5-digit number found (usually the zip code at the end of the address)
         zip_code = matches[-1]
         
-        # Check if the zip code starts with the user's input (e.g. '40000' starts with '40')
-        return zip_code.startswith(user_region.strip())
+        # Check if the zip code starts with the user's input (convert to str to prevent crashes)
+        return zip_code.startswith(str(user_region).strip())
         
     return False
 
@@ -44,7 +44,7 @@ def matches_department(location_text, user_region):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     add_subscriber(chat_id)
-    await update.message.reply_text("✅ You are now subscribed to CROUS alerts!\nUse `/setregion <number>` to select your department code (e.g. 63).", parse_mode='Markdown')
+    await update.message.reply_text("✅ You are now subscribed to CROUS alerts!\nUse `/setregion <number>` to select your department code (e.g. 63).")
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -53,7 +53,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def set_region(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ Please specify a department code.\nExample: `/setregion 63` or `/setregion 75`", parse_mode='Markdown')
+        await update.message.reply_text("❌ Please specify a department code.\nExample: <code>/setregion 63</code>", parse_mode='HTML')
         return
     
     region = context.args[0] # Take the first argument as the code
@@ -61,9 +61,9 @@ async def set_region(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     update_subscriber_region(chat_id, region)
     await update.message.reply_text(
-        f"✅ Your preferred department code has been set to: *{region}*\n"
-        f"💡 _Tip: Use /restrict to hide all rooms that are not in this department._", 
-        parse_mode='Markdown'
+        f"✅ Your preferred department code has been set to: <b>{region}</b>\n"
+        f"💡 <i>Tip: Use /restrict to hide all rooms that are not in this department.</i>", 
+        parse_mode='HTML'
     )
 
 async def restrict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -71,14 +71,14 @@ async def restrict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subs = get_subscribers()
     user_data = subs.get(chat_id)
     if not user_data or not user_data.get('region'):
-        await update.message.reply_text("❌ Please set a department code first using `/setregion 63`.", parse_mode='Markdown')
+        await update.message.reply_text("❌ Please set a department code first using <code>/setregion 63</code>.", parse_mode='HTML')
         return
     is_now_restricted = toggle_restrict(chat_id)
     region = user_data['region']
     if is_now_restricted:
-        await update.message.reply_text(f"🔒 Restriction *ENABLED*.\nYou will now ONLY receive notifications and see rooms in department *{region}*.", parse_mode='Markdown')
+        await update.message.reply_text(f"🔒 Restriction <b>ENABLED</b>.\nYou will now ONLY receive notifications and see rooms in department <b>{region}</b>.", parse_mode='HTML')
     else:
-        await update.message.reply_text(f"🔓 Restriction *DISABLED*.\nYou will now see all rooms.", parse_mode='Markdown')
+        await update.message.reply_text(f"🔓 Restriction <b>DISABLED</b>.\nYou will now see all rooms.", parse_mode='HTML')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribers = len(get_subscribers())
@@ -102,7 +102,6 @@ async def showall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     rooms_to_show = []
     for room in rooms:
-        # Check against the new department code logic
         location_text = room.get('location', '')
         matches_region = matches_department(location_text, user_region)
         
@@ -111,7 +110,7 @@ async def showall(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rooms_to_show.append((room, matches_region))
 
     if not rooms_to_show:
-        await update.message.reply_text(f"❌ No rooms currently available matching your department code: *{user_region}*", parse_mode='Markdown')
+        await update.message.reply_text(f"❌ No rooms currently available matching your department code: <b>{user_region}</b>", parse_mode='HTML')
         return
 
     await update.message.reply_text(f"🏠 {len(rooms_to_show)} room(s) to show:")
@@ -171,10 +170,11 @@ async def check_rooms(context: ContextTypes.DEFAULT_TYPE):
                             continue
                         region_tag = f"✅ Matches department: {user_region}\n" if matches_region else f"⚠️ Not in {user_region}\n"
 
-                    message = f"🟢 *NEW CROUS ACCOMMODATION!*\n\n🏢 {room['title']}\n📍 {room.get('location', 'Unknown')}\n💶 {room['price']}\n{region_tag}\n🔗 {room['url']}"
+                    # CHANGED TO HTML: Fixes Telegram rejecting messages with random symbols in the text
+                    message = f"🟢 <b>NEW CROUS ACCOMMODATION!</b>\n\n🏢 {room['title']}\n📍 {room.get('location', 'Unknown')}\n💶 {room['price']}\n{region_tag}\n🔗 {room['url']}"
 
                     try:
-                        await context.bot.send_message(chat_id=chat_id, text=message, disable_web_page_preview=True, parse_mode="Markdown")
+                        await context.bot.send_message(chat_id=chat_id, text=message, disable_web_page_preview=True, parse_mode="HTML")
                     except Exception as e:
                         print(f"Failed to send to {chat_id}: {e}")
                         
@@ -193,10 +193,11 @@ async def check_rooms(context: ContextTypes.DEFAULT_TYPE):
                         if is_restricted and not matches_region:
                             continue
 
-                    message = f"🔴 *ACCOMMODATION TAKEN/REMOVED*\n\n🏢 {room['title']}\n📍 {room.get('location', 'Unknown')}\nThis room is no longer available on the website."
+                    # CHANGED TO HTML
+                    message = f"🔴 <b>ACCOMMODATION TAKEN/REMOVED</b>\n\n🏢 {room['title']}\n📍 {room.get('location', 'Unknown')}\nThis room is no longer available on the website."
 
                     try:
-                        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
+                        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
                     except Exception as e:
                         print(f"Failed to send to {chat_id}: {e}")
 
