@@ -1,105 +1,74 @@
-import re
-import requests
+import httpx
+import asyncio
 from bs4 import BeautifulSoup
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-}
+BASE_URL = "https://trouverunlogement.lescrous.fr"
+SEARCH_URL = f"{BASE_URL}/tools/47/search"
 
-def fetch_crous_accommodations(tool_id=47, page=1):
-    """
-    Fetches the HTML of the Crous search results page.
-    """
-    url = f"https://trouverunlogement.lescrous.fr/tools/{tool_id}/search?page={page}"
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
-        return response.text
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Network error while fetching {url}: {e}")
-        return None
 
-def parse_accommodations(html_content, target_department=None):
-    """
-    Parses all accommodation cards from the page HTML.
-    """
-    if not html_content:
-        return []
+async def get_available_rooms():
+    rooms = []
+    seen = set()
+    page = 1
 
-    soup = BeautifulSoup(html_content, "html.parser")
-    cards = soup.find_all("div", class_="fr-card")
-    accommodations = []
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+        while True:
+            url = f"{SEARCH_URL}?page={page}"
+            
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+            except Exception as e:
+                print(f"Error fetching page {page}: {e}")
+                break
 
-    for card in cards:
-        # 1. Title & Link
-        title_el = card.select_one("h3.fr-card__title a")
-        if not title_el:
-            continue
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # --- NEW METHOD: Find all accommodation cards first ---
+            cards = soup.select('.fr-card')
 
-        title = title_el.get_text(strip=True)
-        rel_link = title_el.get("href", "").strip()
-        link = f"https://trouverunlogement.lescrous.fr{rel_link}" if rel_link.startswith("/") else rel_link
+            # If no cards are found, we reached the last page
+            if not cards:
+                break
 
-        # 2. Address
-        desc_el = card.select_one("p.fr-card__desc")
-        address = desc_el.get_text(strip=True) if desc_el else "Adresse non spécifiée"
+            new_rooms_on_page = False
 
-        # 3. Price
-        badge_el = card.select_one("ul.fr-badges-group p.fr-badge")
-        price = badge_el.get_text(strip=True) if badge_el else "Prix non indiqué"
+            for card in cards:
+                # 1. Find the link inside the card
+                link = card.select_one('a[href*="/accommodations/"]')
+                if not link:
+                    continue
 
-        # 4. Department / Postal code detection
-        postal_code_match = re.search(r"\b\d{5}\b", address)
-        postal_code = postal_code_match.group(0) if postal_code_match else None
+                href = link.get("href")
+                if not href or href in seen:
+                    continue
 
-        # Check if it matches the target department (e.g., '63', '20')
-        matches_dept = False
-        if target_department and postal_code:
-            matches_dept = postal_code.startswith(str(target_department))
+                new_rooms_on_page = True
+                seen.add(href)
 
-        accommodations.append({
-            "title": title,
-            "address": address,
-            "price": price,
-            "postal_code": postal_code,
-            "link": link,
-            "matches_dept": matches_dept,
-        })
+                # 2. Extract Title
+                title = link.get_text(strip=True)
+                
+                # 3. Extract Location (City / Address)
+                desc_elem = card.select_one('.fr-card__desc')
+                location = desc_elem.get_text(strip=True) if desc_elem else "Lieu inconnu"
 
-    return accommodations
+                # 4. Extract Price (Using p.fr-badge to avoid clicking the heart button)
+                price_elem = card.select_one('p.fr-badge')
+                price = price_elem.get_text(strip=True) if price_elem else "Prix inconnu"
 
-def format_telegram_message(item, target_dept):
-    """
-    Formats the accommodation dictionary into your bot's notification message.
-    """
-    status_icon = "✅ Matches department" if item["matches_dept"] else "⚠️ Not in"
-    dept_label = f"{item['postal_code']}" if item["matches_dept"] else f"{target_dept}"
+                # Save room
+                rooms.append({
+                    "title": title,
+                    "location": location,
+                    "price": price,
+                    "url": BASE_URL + href,
+                })
 
-    message = (
-        f"🟢 NEW CROUS ACCOMMODATION!\n\n"
-        f"🏢 {item['title']}\n"
-        f"📍 {item['address']}\n"
-        f"💶 {item['price']}\n"
-        f"{status_icon}: {dept_label}\n\n"
-        f"🔗 {item['link']}"
-    )
-    return message
+            if not new_rooms_on_page:
+                break
 
-# ================================
-# Example usage / Test run
-# ================================
-if __name__ == "__main__":
-    TARGET_DEPT = "63"  # Change to your target department (e.g., '63', '20', etc.)
+            page += 1
+            await asyncio.sleep(1)
 
-    print("Fetching Crous accommodations...")
-    html = fetch_crous_accommodations(tool_id=47, page=1)
-    results = parse_accommodations(html, target_department=TARGET_DEPT)
-
-    print(f"Found {len(results)} accommodations on page 1.\n")
-    
-    for item in results:
-        # If you only want to send notifications for matching departments:
-        # if item["matches_dept"]:
-        print(format_telegram_message(item, TARGET_DEPT))
-        print("-" * 50)
+    return rooms
